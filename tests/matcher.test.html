@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Testes — matcher e storage</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: Consolas, 'Courier New', monospace;
+      background-color: #1e1e1e;
+      color: #d4d4d4;
+      padding: 24px;
+      line-height: 1.5;
+    }
+    h1 { font-size: 20px; margin-bottom: 4px; color: #4ec9b0; }
+    .hint { font-size: 12px; color: #858585; margin-bottom: 20px; }
+    h2 {
+      font-size: 14px;
+      color: #569cd6;
+      margin: 22px 0 8px;
+      border-bottom: 1px solid #333;
+      padding-bottom: 4px;
+    }
+    .summary {
+      padding: 14px 16px;
+      border-radius: 4px;
+      border: 1px solid #3e3e42;
+      background-color: #252526;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+    .summary.ok { border-color: #4ec9b0; }
+    .summary.bad { border-color: #f48771; }
+    .summary b { font-size: 16px; }
+    .case { font-size: 12.5px; padding: 3px 8px; border-radius: 3px; }
+    .case.pass { color: #6a9955; }
+    .case.fail { background-color: #3a1e1e; color: #f48771; margin: 3px 0; }
+    .case.skip { color: #c0a24a; }
+    .detail { display: block; padding-left: 18px; color: #ce9178; }
+    .banner {
+      padding: 14px 16px;
+      border: 1px solid #c0a24a;
+      background-color: #33301e;
+      border-radius: 4px;
+      color: #e0c880;
+      font-size: 13px;
+      margin-bottom: 20px;
+    }
+    .panel {
+      margin-top: 28px;
+      padding: 16px;
+      border: 1px solid #3e3e42;
+      border-radius: 4px;
+      background-color: #252526;
+      font-size: 13px;
+    }
+    .panel h2 { margin-top: 0; }
+    .panel p { color: #9e9e9e; margin-bottom: 10px; }
+    .panel .status { margin: 10px 0; font-size: 13px; }
+    button {
+      font-family: inherit;
+      font-size: 12.5px;
+      padding: 7px 14px;
+      margin-right: 8px;
+      border: 1px solid #4a4a4a;
+      border-radius: 3px;
+      background-color: #333;
+      color: #d4d4d4;
+      cursor: pointer;
+    }
+    button:hover { background-color: #3f3f3f; }
+    code { color: #ce9178; }
+  </style>
+</head>
+<body>
+  <h1>Testes — matcher e storage (Etapa 2)</h1>
+  <p class="hint">
+    Abra esta página pela URL <code>chrome-extension://&lt;ID&gt;/tests/matcher.test.html</code>.
+    Por <code>file://</code> o navegador bloqueia módulos ES.
+  </p>
+
+  <!-- Fica visível se o módulo não carregar; o próprio módulo remove o aviso. -->
+  <div class="banner" id="loadBanner">
+    Os módulos não carregaram. Copie o ID em <code>chrome://extensions</code> e abra
+    <code>chrome-extension://&lt;ID&gt;/tests/matcher.test.html</code>.
+  </div>
+
+  <div id="summary"></div>
+  <div id="results"></div>
+
+  <div class="panel" id="markerPanel" hidden>
+    <h2>Persistência entre sessões do Chrome</h2>
+    <p>
+      Crie o marcador, feche o Chrome por completo, reabra e volte a esta página.
+      O marcador precisa continuar aqui — é a verificação de que as regras sobrevivem
+      a reiniciar o navegador.
+    </p>
+    <div class="status" id="markerStatus">…</div>
+    <button id="createMarker">Criar marcador</button>
+    <button id="removeMarker">Remover marcador</button>
+  </div>
+
+  <script type="module">
+    import {
+      escapeRegex, isInternalUrl, isSupportedUrl, normalizeUrl, normalizePattern,
+      validatePattern, patternToRegex, matchUrl, findFirstMatchingRule, suggestPatterns
+    } from '../src/lib/matcher.js';
+
+    import {
+      SCHEMA_VERSION, LIMIT_MIN, LIMIT_MAX, defaultConfig, defaultSettings,
+      validateLimit, validateRule, resolveAction, sanitizeConfig, migrateConfig,
+      actionClosesTab, actionFocusesExistingTab, GLOBAL_ACTIONS, RULE_ACTIONS,
+      getConfig, saveConfig, ensureConfig, addRule, updateRule, removeRule,
+      moveRule, updateSettings
+    } from '../src/lib/storage.js';
+
+    document.getElementById('loadBanner').remove();
+
+    // ---------------------------------------------------------------- runner
+    const cases = [];
+    let currentSection = 'geral';
+    let passed = 0;
+    let failed = 0;
+    let skipped = 0;
+
+    function section(name) {
+      currentSection = name;
+      cases.push({ kind: 'section', name });
+    }
+
+    function record(name, ok, detail) {
+      if (ok) passed++;
+      else failed++;
+      cases.push({ kind: 'case', name, ok, detail: ok ? null : detail, section: currentSection });
+    }
+
+    function skip(name, reason) {
+      skipped++;
+      cases.push({ kind: 'skip', name, detail: reason });
+    }
+
+    /** Asserção booleana. */
+    function ok(name, value) {
+      record(name, value === true, `esperado true, obtido ${show(value)}`);
+    }
+
+    /** Asserção de igualdade profunda. */
+    function eq(name, actual, expected) {
+      record(name, deepEqual(actual, expected), `esperado ${show(expected)}, obtido ${show(actual)}`);
+    }
+
+    function deepEqual(a, b) {
+      if (a === b) return true;
+      if (typeof a !== typeof b || a === null || b === null || typeof a !== 'object') return false;
+      if (Array.isArray(a) !== Array.isArray(b)) return false;
+      const keysA = Object.keys(a);
+      const keysB = Object.keys(b);
+      if (keysA.length !== keysB.length) return false;
+      return keysA.every((key) => key in b && deepEqual(a[key], b[key]));
+    }
+
+    function show(value) {
+      if (typeof value === 'string') return JSON.stringify(value);
+      if (value instanceof RegExp) return String(value);
+      try { return JSON.stringify(value); } catch { return String(value); }
+    }
+
+    // =====================================================================
+    // matcher.js
+    // =====================================================================
+
+    section('matcher — escapeRegex (armadilha 9)');
+    eq('escapa metacaracteres', escapeRegex('a.b+c?d^e$f{g}h(i)j|k[l]m\\n/o'),
+       'a\\.b\\+c\\?d\\^e\\$f\\{g\\}h\\(i\\)j\\|k\\[l\\]m\\\\n\\/o');
+    eq('não escapa o curinga', escapeRegex('a*b'), 'a*b');
+
+    section('matcher — URLs internas (regra 9, armadilha 4)');
+    ok('chrome:// é interna', isInternalUrl('chrome://extensions'));
+    ok('chrome-extension:// é interna', isInternalUrl('chrome-extension://abc/blocked.html'));
+    ok('devtools:// é interna', isInternalUrl('devtools://devtools/bundled/x.html'));
+    ok('view-source: é interna', isInternalUrl('view-source:https://exemplo.com/'));
+    ok('about: é interna', isInternalUrl('about:blank'));
+    ok('file:// é interna', isInternalUrl('file:///C:/temp/x.html'));
+    ok('edge:// é interna', isInternalUrl('edge://settings'));
+    ok('https não é interna', isInternalUrl('https://exemplo.com/') === false);
+    ok('https é suportada', isSupportedUrl('https://exemplo.com/'));
+    ok('http é suportada', isSupportedUrl('http://exemplo.com/'));
+    ok('ftp não é suportada', isSupportedUrl('ftp://exemplo.com/') === false);
+    ok('vazio não é suportado', isSupportedUrl('') === false);
+    ok('undefined não é suportado', isSupportedUrl(undefined) === false);
+    ok('chrome-extension não é suportada', isSupportedUrl('chrome-extension://abc/blocked.html') === false);
+
+    section('matcher — normalizeUrl (armadilha 10)');
+    eq('minúsculas no esquema e no host, caixa do caminho preservada',
+       normalizeUrl('HTTPS://Exemplo.COM/MFA/Login'), 'https://exemplo.com/MFA/Login');
+    eq('fragmento descartado',
+       normalizeUrl('https://exemplo.com/a?x=1#topo'), 'https://exemplo.com/a?x=1');
+    eq('query preservada', normalizeUrl('https://exemplo.com/a?x=1&y=2'), 'https://exemplo.com/a?x=1&y=2');
+    eq('caminho vazio vira /', normalizeUrl('https://exemplo.com'), 'https://exemplo.com/');
+    eq('porta padrão removida', normalizeUrl('https://exemplo.com:443/a'), 'https://exemplo.com/a');
+    eq('porta não padrão preservada', normalizeUrl('https://exemplo.com:8443/a'), 'https://exemplo.com:8443/a');
+    eq('credenciais descartadas', normalizeUrl('https://u:p@exemplo.com/a'), 'https://exemplo.com/a');
+    eq('espaços em volta são ignorados', normalizeUrl('  https://exemplo.com/a  '), 'https://exemplo.com/a');
+    eq('chrome:// devolve null', normalizeUrl('chrome://extensions'), null);
+    eq('file:// devolve null', normalizeUrl('file:///C:/x'), null);
+    eq('string vazia devolve null', normalizeUrl(''), null);
+    eq('não-string devolve null', normalizeUrl(null), null);
+    eq('texto qualquer devolve null', normalizeUrl('exemplo.com/a'), null);
+
+    section('matcher — caso canônico do portal MFA (limite 3)');
+    const PADRAO_MFA = 'https://portal.exemplo.com/mfa/*';
+    eq('regex gerada', String(patternToRegex(PADRAO_MFA)),
+       '/^https:\\/\\/portal\\.exemplo\\.com\\/mfa\\/.*$/');
+    ok('casa a raiz da pasta', matchUrl('https://portal.exemplo.com/mfa/', PADRAO_MFA));
+    ok('casa uma subpágina', matchUrl('https://portal.exemplo.com/mfa/login', PADRAO_MFA));
+    ok('casa com query', matchUrl('https://portal.exemplo.com/mfa/login?next=/x', PADRAO_MFA));
+    ok('casa em profundidade', matchUrl('https://portal.exemplo.com/mfa/a/b/c', PADRAO_MFA));
+    ok('casa com host em maiúsculas', matchUrl('https://Portal.Exemplo.com/mfa/x', PADRAO_MFA));
+    ok('casa ignorando fragmento', matchUrl('https://portal.exemplo.com/mfa/x#topo', PADRAO_MFA));
+    ok('NÃO casa sem a barra final', matchUrl('https://portal.exemplo.com/mfa', PADRAO_MFA) === false);
+    ok('NÃO casa outro esquema', matchUrl('http://portal.exemplo.com/mfa/x', PADRAO_MFA) === false);
+    ok('NÃO casa outro host', matchUrl('https://outro.com/mfa/x', PADRAO_MFA) === false);
+    ok('NÃO casa outra pasta', matchUrl('https://portal.exemplo.com/sso/x', PADRAO_MFA) === false);
+    ok('NÃO casa host como sufixo', matchUrl('https://mal.portal.exemplo.com/mfa/x', PADRAO_MFA) === false);
+
+    section('matcher — literais e escapes');
+    ok('ponto é literal, não "qualquer caractere"',
+       matchUrl('https://exemplo.com/axb/z', 'https://exemplo.com/a.b/*') === false);
+    ok('ponto casa consigo mesmo',
+       matchUrl('https://exemplo.com/a.b/z', 'https://exemplo.com/a.b/*'));
+    ok('mais é literal', matchUrl('https://exemplo.com/a+b/z', 'https://exemplo.com/a+b/*'));
+    ok('mais não repete o caractere anterior',
+       matchUrl('https://exemplo.com/aaab/z', 'https://exemplo.com/a+b/*') === false);
+    ok('parênteses e colchetes literais',
+       matchUrl('https://exemplo.com/a(b)[c]/z', 'https://exemplo.com/a(b)[c]/*'));
+    ok('interrogação delimita a query e é literal',
+       matchUrl('https://exemplo.com/a?b=1', 'https://exemplo.com/a?b=1'));
+    ok('interrogação não vira opcional',
+       matchUrl('https://exemplo.com/ab=1', 'https://exemplo.com/a?b=1') === false);
+    ok('cifrão e chaves literais',
+       matchUrl('https://exemplo.com/${x}/z', 'https://exemplo.com/${x}/*'));
+
+    section('matcher — curinga');
+    ok('curinga no host casa subdomínio', matchUrl('https://a.exemplo.com/x', 'https://*.exemplo.com/*'));
+    ok('curinga no host casa subdomínio profundo', matchUrl('https://b.a.exemplo.com/x', 'https://*.exemplo.com/*'));
+    ok('curinga no host NÃO casa o domínio pelado',
+       matchUrl('https://exemplo.com/x', 'https://*.exemplo.com/*') === false);
+    ok('curinga no meio do caminho', matchUrl('https://exemplo.com/a/qualquer/b', 'https://exemplo.com/a/*/b'));
+    ok('curinga casa sequência vazia', matchUrl('https://exemplo.com/a/', 'https://exemplo.com/a/*'));
+    eq('curingas repetidos são colapsados', normalizePattern('https://exemplo.com/a/***'),
+       'https://exemplo.com/a/*');
+    ok('padrão sem curinga casa só a URL exata',
+       matchUrl('https://exemplo.com/a', 'https://exemplo.com/a') &&
+       matchUrl('https://exemplo.com/ab', 'https://exemplo.com/a') === false);
+
+    section('matcher — normalizePattern');
+    eq('host em minúsculas, caminho preservado', normalizePattern('HTTPS://Exemplo.COM/MFA/*'),
+       'https://exemplo.com/MFA/*');
+    ok('caminho é sensível à caixa (armadilha 10)',
+       matchUrl('https://exemplo.com/MFA/x', 'https://exemplo.com/MFA/*') &&
+       matchUrl('https://exemplo.com/mfa/x', 'https://exemplo.com/MFA/*') === false);
+    eq('fragmento do padrão descartado', normalizePattern('https://exemplo.com/a/*#topo'),
+       'https://exemplo.com/a/*');
+    eq('espaços em volta removidos', normalizePattern('  https://exemplo.com/a/*  '),
+       'https://exemplo.com/a/*');
+    eq('padrão inválido devolve null', normalizePattern('exemplo.com/*'), null);
+
+    section('matcher — validatePattern (regra 13)');
+    ok('vazio é rejeitado', validatePattern('').valid === false);
+    ok('vazio traz mensagem', validatePattern('').error.includes('Informe'));
+    ok('só espaços é rejeitado', validatePattern('   ').valid === false);
+    ok('não-string é rejeitado', validatePattern(undefined).valid === false);
+    ok('sem esquema é rejeitado', validatePattern('exemplo.com/*').valid === false);
+    ok('sem esquema explica o que fazer', validatePattern('exemplo.com/*').error.includes('http://'));
+    ok('curinga no esquema é rejeitado', validatePattern('*://exemplo.com/*').valid === false);
+    ok('curinga no esquema tem mensagem própria',
+       validatePattern('*://exemplo.com/*').error.includes('esquema'));
+    ok('ftp é rejeitado', validatePattern('ftp://exemplo.com/*').valid === false);
+    ok('chrome:// é rejeitado', validatePattern('chrome://extensions/*').valid === false);
+    ok('chrome-extension:// é rejeitado', validatePattern('chrome-extension://abc/*').valid === false);
+    ok('padrão longo demais é rejeitado',
+       validatePattern(`https://exemplo.com/${'a'.repeat(2100)}`).valid === false);
+    ok('padrão válido é aceito', validatePattern(PADRAO_MFA).valid);
+    eq('padrão válido devolve o normalizado', validatePattern(PADRAO_MFA).normalized, PADRAO_MFA);
+    eq('padrão com curinga não gera aviso', validatePattern(PADRAO_MFA).warning, null);
+    ok('padrão sem curinga gera aviso',
+       typeof validatePattern('https://exemplo.com/a').warning === 'string');
+    eq('padrão válido não tem erro', validatePattern(PADRAO_MFA).error, null);
+
+    section('matcher — findFirstMatchingRule (a primeira que casar vence)');
+    const orderedRules = [
+      { id: 'r1', pattern: 'https://exemplo.com/a/*', limit: 1 },
+      { id: 'r2', pattern: 'https://exemplo.com/*', limit: 5 }
+    ];
+    eq('a mais específica vence por estar antes',
+       findFirstMatchingRule('https://exemplo.com/a/x', orderedRules)?.id, 'r1');
+    eq('a genérica atende o resto',
+       findFirstMatchingRule('https://exemplo.com/b/x', orderedRules)?.id, 'r2');
+    eq('ordem invertida muda o vencedor',
+       findFirstMatchingRule('https://exemplo.com/a/x', [...orderedRules].reverse())?.id, 'r2');
+    eq('regra desabilitada é ignorada',
+       findFirstMatchingRule('https://exemplo.com/a/x',
+         [{ id: 'r1', pattern: 'https://exemplo.com/a/*', enabled: false }, orderedRules[1]])?.id, 'r2');
+    eq('sem casar devolve null', findFirstMatchingRule('https://outro.com/', orderedRules), null);
+    eq('URL interna devolve null', findFirstMatchingRule('chrome://extensions', orderedRules), null);
+    eq('lista vazia devolve null', findFirstMatchingRule('https://exemplo.com/a/x', []), null);
+    eq('lista inválida devolve null', findFirstMatchingRule('https://exemplo.com/a/x', null), null);
+    eq('regra com padrão inválido é ignorada',
+       findFirstMatchingRule('https://exemplo.com/a/x',
+         [{ id: 'ruim', pattern: 'lixo' }, orderedRules[0]])?.id, 'r1');
+
+    section('matcher — suggestPatterns');
+    const suggested = suggestPatterns('https://portal.exemplo.com/mfa/login?x=1');
+    eq('primeira sugestão é a pasta', suggested[0]?.pattern, PADRAO_MFA);
+    ok('sugere também o site inteiro',
+       suggested.some((s) => s.pattern === 'https://portal.exemplo.com/*'));
+    ok('sugere também a URL exata, com a query preservada',
+       suggested.some((s) => s.pattern === 'https://portal.exemplo.com/mfa/login?x=1'));
+    ok('toda sugestão tem rótulo', suggested.every((s) => typeof s.label === 'string' && s.label !== ''));
+    eq('raiz do site não duplica sugestões', suggestPatterns('https://exemplo.com/').length, 2);
+    eq('URL interna não gera sugestão', suggestPatterns('chrome://extensions').length, 0);
+    ok('toda sugestão é um padrão válido', suggested.every((s) => validatePattern(s.pattern).valid));
+    ok('a URL de origem casa com a sugestão da pasta',
+       matchUrl('https://portal.exemplo.com/mfa/login?x=1', suggested[0].pattern));
+    ok('a URL de origem casa com a sugestão "somente esta URL" (achado do code-review)',
+       matchUrl('https://portal.exemplo.com/mfa/login?x=1',
+         suggested.find((s) => s.label === 'Somente esta URL').pattern));
+
+    section('matcher — curinga precisa da barra do caminho');
+    ok('padrão sem caminho terminando em curinga é rejeitado',
+       validatePattern('https://portal.exemplo.com*').valid === false);
+    ok('o erro diz o que fazer', validatePattern('https://portal.exemplo.com*').error.includes('barra'));
+    ok('https://* também é rejeitado', validatePattern('https://*').valid === false);
+    ok('com a barra explícita é aceito', validatePattern('https://portal.exemplo.com/*').valid);
+    ok('e aí casa as subpáginas de verdade',
+       matchUrl('https://portal.exemplo.com/mfa', 'https://portal.exemplo.com/*'));
+    ok('curinga no host com caminho explícito continua válido',
+       validatePattern('https://*.exemplo.com/*').valid);
+    ok('padrão sem caminho e sem curinga continua válido',
+       validatePattern('https://exemplo.com').valid);
+
+    section('matcher — asterisco literal na URL não vira curinga');
+    {
+      const comAsterisco = suggestPatterns('https://exemplo.com/busca?q=a*b');
+      ok('nenhuma sugestão embute o asterisco literal do caminho',
+         comAsterisco.every((s) => !s.pattern.includes('a*b')));
+      ok('a sugestão do site inteiro continua sendo oferecida',
+         comAsterisco.some((s) => s.pattern === 'https://exemplo.com/*'));
+      eq('e a sugestão de URL exata é omitida, porque não há como representá-la',
+         comAsterisco.some((s) => s.label === 'Somente esta URL'), false);
+      ok('URL sem asterisco continua com as três sugestões',
+         suggestPatterns('https://exemplo.com/a/b').length === 3);
+    }
+
+    section('matcher — escapes percentuais (RFC 3986)');
+    eq('escape minúsculo na URL vira maiúsculo', normalizeUrl('https://exemplo.com/a%2fb'),
+       'https://exemplo.com/a%2Fb');
+    eq('escape minúsculo no padrão também', normalizePattern('https://exemplo.com/a%2fb'),
+       'https://exemplo.com/a%2Fb');
+    ok('%2f casa %2F — o RFC diz que são o mesmo octeto',
+       matchUrl('https://exemplo.com/a%2fb', 'https://exemplo.com/a%2Fb'));
+    ok('e o inverso também', matchUrl('https://exemplo.com/a%2Fb', 'https://exemplo.com/a%2fb'));
+    ok('vale para a query', matchUrl('https://exemplo.com/a?q=%c3%a9', 'https://exemplo.com/a?q=%C3%A9'));
+    eq('sequência que não é escape válido fica intacta', normalizeUrl('https://exemplo.com/a%zzb'),
+       'https://exemplo.com/a%zzb');
+    eq('o curinga não é afetado', normalizePattern('https://exemplo.com/a/*'), 'https://exemplo.com/a/*');
+
+    section('matcher — aviso ciente do caminho');
+    eq('curinga no caminho não gera aviso', validatePattern('https://exemplo.com/a/*').warning, null);
+    ok('curinga SÓ no host gera aviso: casa apenas aquele caminho exato',
+       (validatePattern('https://*.exemplo.com/login').warning ?? '').includes('só no host'));
+    ok('padrão sem curinga nenhum gera o aviso de URL exata',
+       (validatePattern('https://exemplo.com/login').warning ?? '').includes('Sem curinga'));
+    ok('curinga na query conta como caminho e não gera aviso',
+       validatePattern('https://exemplo.com/a?q=*').warning === null);
+
+    section('matcher — token reservado (achado do code-review)');
+    ok('token em minúsculas no host é rejeitado', validatePattern('https://0w1ldc4rd0.exemplo.com/*').valid === false);
+    ok('token em MAIÚSCULAS no host também é rejeitado — antes escapava da checagem e era ' +
+       'reescrito em curinga depois que o host virava minúsculas',
+       validatePattern('https://0W1LDC4RD0.exemplo.com/*').valid === false);
+    ok('token em caixa mista também é rejeitado', validatePattern('https://0W1ldC4rd0.exemplo.com/*').valid === false);
+
+    // =====================================================================
+    // storage.js — parte pura
+    // =====================================================================
+
+    section('storage — defaults');
+    eq('defaultConfig obedece ao schema', defaultConfig(),
+       { version: SCHEMA_VERSION, settings: { defaultAction: 'close', notifyOnEnforce: true, enforceOnStartup: false }, rules: [] });
+    ok('defaultConfig devolve objeto novo a cada chamada', defaultConfig() !== defaultConfig());
+    ok('defaultSettings devolve objeto novo a cada chamada', defaultSettings() !== defaultSettings());
+
+    section('storage — validateLimit (regra 13)');
+    ok(`${LIMIT_MIN} é válido`, validateLimit(LIMIT_MIN).valid);
+    ok(`${LIMIT_MAX} é válido`, validateLimit(LIMIT_MAX).valid);
+    eq('string numérica é convertida', validateLimit(' 4 ').value, 4);
+    ok('0 é rejeitado', validateLimit(0).valid === false);
+    ok('100 é rejeitado', validateLimit(100).valid === false);
+    ok('negativo é rejeitado', validateLimit(-3).valid === false);
+    ok('fracionário é rejeitado', validateLimit(3.5).valid === false);
+    ok('vazio é rejeitado', validateLimit('').valid === false);
+    ok('texto é rejeitado', validateLimit('abc').valid === false);
+    ok('undefined é rejeitado', validateLimit(undefined).valid === false);
+    ok('booleano é rejeitado', validateLimit(true).valid === false);
+    ok('NaN é rejeitado', validateLimit(NaN).valid === false);
+    ok('mensagem cita a faixa', validateLimit(0).error.includes(String(LIMIT_MAX)));
+
+    section('storage — validateRule');
+    const existing = [{ id: 'r1', pattern: 'https://exemplo.com/a/*', label: 'Regra A' }];
+    ok('regra válida é aceita', validateRule({ pattern: PADRAO_MFA, limit: 3 }, existing).valid);
+    eq('padrão é normalizado nos campos',
+       validateRule({ pattern: 'HTTPS://Exemplo.COM/b/*', limit: 3 }, existing).fields.pattern,
+       'https://exemplo.com/b/*');
+    eq('ação padrão é "default"', validateRule({ pattern: PADRAO_MFA, limit: 3 }, existing).fields.action, 'default');
+    eq('enabled padrão é true', validateRule({ pattern: PADRAO_MFA, limit: 3 }, existing).fields.enabled, true);
+    eq('rótulo é saneado',
+       validateRule({ pattern: PADRAO_MFA, limit: 3, label: '  Portal   MFA  ' }, existing).fields.label,
+       'Portal MFA');
+    ok('padrão duplicado é rejeitado',
+       validateRule({ pattern: 'https://exemplo.com/a/*', limit: 2 }, existing).valid === false);
+    ok('duplicado é detectado após normalizar (caixa do host)',
+       validateRule({ pattern: 'HTTPS://EXEMPLO.COM/a/*', limit: 2 }, existing).valid === false);
+    ok('mensagem de duplicado é clara',
+       validateRule({ pattern: 'https://exemplo.com/a/*', limit: 2 }, existing).error.includes('Já existe'));
+    ok('mensagem de duplicado cita o rótulo',
+       validateRule({ pattern: 'https://exemplo.com/a/*', limit: 2 }, existing).error.includes('Regra A'));
+    ok('ignoreId permite editar a própria regra',
+       validateRule({ pattern: 'https://exemplo.com/a/*', limit: 2 }, existing, 'r1').valid);
+    ok('padrão inválido é rejeitado', validateRule({ pattern: 'lixo', limit: 3 }, existing).valid === false);
+    ok('limite inválido é rejeitado', validateRule({ pattern: PADRAO_MFA, limit: 0 }, existing).valid === false);
+    ok('ação inexistente é rejeitada',
+       validateRule({ pattern: PADRAO_MFA, limit: 3, action: 'explodir' }, existing).valid === false);
+    ok('as 4 ações e "default" são aceitas',
+       ['default', 'close', 'closeQuiet', 'block', 'notify'].every(
+         (action) => validateRule({ pattern: PADRAO_MFA, limit: 3, action }, existing).valid));
+    eq('RULE_ACTIONS é GLOBAL_ACTIONS mais "default"',
+       RULE_ACTIONS, ['default', ...GLOBAL_ACTIONS]);
+    ok('closeQuiet está nas duas listas',
+       GLOBAL_ACTIONS.includes('closeQuiet') && RULE_ACTIONS.includes('closeQuiet'));
+    ok('candidato não-objeto é rejeitado', validateRule(null, existing).valid === false);
+
+    section('storage — resolveAction');
+    eq('"default" delega à global', resolveAction({ action: 'default' }, { defaultAction: 'block' }), 'block');
+    eq('ação própria vence a global', resolveAction({ action: 'notify' }, { defaultAction: 'block' }), 'notify');
+    eq('ação corrompida cai na global', resolveAction({ action: 'lixo' }, { defaultAction: 'notify' }), 'notify');
+    eq('global corrompida cai no default do schema', resolveAction({ action: 'default' }, { defaultAction: 'lixo' }), 'close');
+    eq('sem argumentos cai no default do schema', resolveAction(undefined, undefined), 'close');
+    eq('closeQuiet como global, regra em "default"',
+       resolveAction({ action: 'default' }, { defaultAction: 'closeQuiet' }), 'closeQuiet');
+    eq('closeQuiet como override da regra vence a global',
+       resolveAction({ action: 'closeQuiet' }, { defaultAction: 'block' }), 'closeQuiet');
+
+    section('storage — o que cada ação faz (tabela de decisão)');
+    ok('close fecha a aba', actionClosesTab('close'));
+    ok('closeQuiet fecha a aba', actionClosesTab('closeQuiet'));
+    ok('block NÃO fecha a aba', actionClosesTab('block') === false);
+    ok('notify NÃO fecha a aba', actionClosesTab('notify') === false);
+    ok('ação desconhecida NÃO fecha a aba — a lista é positiva de propósito, ' +
+       'senão qualquer ação nova passaria a fechar aba por omissão',
+       actionClosesTab('acaoQueAindaNaoExiste') === false);
+    ok('só close leva o usuário a uma aba já aberta', actionFocusesExistingTab('close'));
+    ok('closeQuiet NÃO tira o usuário do lugar — é a única diferença entre as duas',
+       actionFocusesExistingTab('closeQuiet') === false);
+    ok('block não foca nada', actionFocusesExistingTab('block') === false);
+    ok('notify não foca nada', actionFocusesExistingTab('notify') === false);
+
+    section('storage — sanitizeConfig (conserta e descarta)');
+    eq('undefined vira defaults', sanitizeConfig(undefined), defaultConfig());
+    eq('null vira defaults', sanitizeConfig(null), defaultConfig());
+    eq('array vira defaults', sanitizeConfig([]), defaultConfig());
+    eq('ação global inválida cai no default',
+       sanitizeConfig({ settings: { defaultAction: 'lixo' } }).settings.defaultAction, 'close');
+    eq('ação global válida é preservada',
+       sanitizeConfig({ settings: { defaultAction: 'notify' } }).settings.defaultAction, 'notify');
+    eq('closeQuiet é preservada como ação global',
+       sanitizeConfig({ settings: { defaultAction: 'closeQuiet' } }).settings.defaultAction, 'closeQuiet');
+    eq('closeQuiet é preservada como ação de regra',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 3, action: 'closeQuiet' }] }).rules[0].action,
+       'closeQuiet');
+    eq('booleano não-booleano cai no default',
+       sanitizeConfig({ settings: { notifyOnEnforce: 'sim' } }).settings.notifyOnEnforce, true);
+    eq('booleano false é preservado',
+       sanitizeConfig({ settings: { enforceOnStartup: true } }).settings.enforceOnStartup, true);
+    eq('rules não-array vira []', sanitizeConfig({ rules: 'x' }).rules, []);
+    eq('regra com padrão inutilizável é descartada',
+       sanitizeConfig({ rules: [{ pattern: 'lixo', limit: 3 }] }).rules.length, 0);
+    eq('padrão duplicado é descartado, o primeiro fica',
+       sanitizeConfig({ rules: [
+         { id: 'a', pattern: 'https://exemplo.com/a/*', limit: 3 },
+         { id: 'b', pattern: 'HTTPS://Exemplo.com/a/*', limit: 7 }
+       ] }).rules.map((r) => r.id), ['a']);
+    eq('limite 0 é elevado ao mínimo',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 0 }] }).rules[0].limit, LIMIT_MIN);
+    eq('limite acima do máximo é limitado',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 500 }] }).rules[0].limit, LIMIT_MAX);
+    eq('limite em string é convertido',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: '4' }] }).rules[0].limit, 4);
+    eq('limite ausente cai no mínimo',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA }] }).rules[0].limit, LIMIT_MIN);
+    eq('limite fracionário é truncado',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 3.9 }] }).rules[0].limit, 3);
+    eq('ação de regra inválida vira "default"',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 3, action: 'lixo' }] }).rules[0].action, 'default');
+    eq('enabled ausente vira true',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 3 }] }).rules[0].enabled, true);
+    eq('enabled false é preservado',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 3, enabled: false }] }).rules[0].enabled, false);
+    eq('id ausente é DERIVADO do padrão, não sorteado — getConfig() é leitura pura e ' +
+       'um id aleatório mudaria a cada chamada, deixando a regra impossível de apagar',
+       migrateConfig({ version: 1, rules: [{ pattern: PADRAO_MFA, limit: 3 }] }).rules[0].id,
+       migrateConfig({ version: 1, rules: [{ pattern: PADRAO_MFA, limit: 3 }] }).rules[0].id);
+    ok('e o id derivado é estável em três leituras seguidas', (() => {
+       const ler = () => migrateConfig({ version: 1, rules: [{ pattern: PADRAO_MFA, limit: 3 }] }).rules[0].id;
+       const [a, b, c] = [ler(), ler(), ler()];
+       return a === b && b === c;
+    })());
+    ok('id ausente é gerado',
+       typeof sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 3 }] }).rules[0].id === 'string' &&
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 3 }] }).rules[0].id.length > 0);
+    eq('id existente é preservado',
+       sanitizeConfig({ rules: [{ id: 'meu-id', pattern: PADRAO_MFA, limit: 3 }] }).rules[0].id, 'meu-id');
+    eq('createdAt inválido vira 0',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 3, createdAt: 'ontem' }] }).rules[0].createdAt, 0);
+    eq('padrão da regra é normalizado',
+       sanitizeConfig({ rules: [{ pattern: 'HTTPS://Exemplo.COM/a/*', limit: 3 }] }).rules[0].pattern,
+       'https://exemplo.com/a/*');
+    eq('campos desconhecidos são removidos',
+       Object.keys(sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 3, xpto: 1 }] }).rules[0]).sort(),
+       ['action', 'createdAt', 'enabled', 'id', 'label', 'limit', 'pattern']);
+    ok('sanitizeConfig é idempotente', (() => {
+      const once = sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 3 }] });
+      return deepEqual(once, sanitizeConfig(once));
+    })());
+
+    section('storage — limite inutilizável desativa a regra');
+    eq('sem limite algum, a regra vem DESATIVADA em vez de assumir 1 e fechar abas',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA }] }).rules[0].enabled, false);
+    eq('limite "abc" também desativa',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 'abc' }] }).rules[0].enabled, false);
+    eq('limite fora da faixa é consertado, não desativa',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 500 }] }).rules[0].enabled, true);
+    eq('e o valor consertado é o máximo',
+       sanitizeConfig({ rules: [{ pattern: PADRAO_MFA, limit: 500 }] }).rules[0].limit, LIMIT_MAX);
+
+    section('storage — validateLimit exige inteiro decimal');
+    ok('hexadecimal "0x63" é rejeitado', validateLimit('0x63').valid === false);
+    ok('binário "0b11" é rejeitado', validateLimit('0b11').valid === false);
+    ok('notação exponencial "1e1" é rejeitada', validateLimit('1e1').valid === false);
+    ok('decimal "3.0" é rejeitado, pois o limite é inteiro', validateLimit('3.0').valid === false);
+    eq('"07" continua valendo 7', validateLimit('07').value, 7);
+    eq('" +7 " continua valendo 7', validateLimit(' +7 ').value, 7);
+
+    section('storage — migrateConfig (regra 14)');
+    eq('version 0 é migrada para 1 — "0" é inteiro e escapava da checagem',
+       migrateConfig({ version: 0, rules: [] }).version, 1);
+    eq('version negativa também é migrada', migrateConfig({ version: -3, rules: [] }).version, 1);
+    eq('version futura é rotulada com a versão atual, não preservada: os campos ' +
+       'que esta versão não conhece já foram descartados, e manter o número faria ' +
+       'a versão futura acreditar que já migrou',
+       migrateConfig({ version: 99, rules: [] }).version, SCHEMA_VERSION);
+    eq('nada gravado vira defaults', migrateConfig(undefined), defaultConfig());
+    eq('dado corrompido vira defaults', migrateConfig('lixo'), defaultConfig());
+    eq('sem version recebe version 1',
+       migrateConfig({ settings: { defaultAction: 'block' }, rules: [] }).version, 1);
+    eq('version não-inteira recebe version 1', migrateConfig({ version: 'x', rules: [] }).version, 1);
+    eq('version atual é preservada', migrateConfig({ version: SCHEMA_VERSION, rules: [] }).version, SCHEMA_VERSION);
+    eq('configuração completa atravessa intacta',
+       migrateConfig({
+         version: 1,
+         settings: { defaultAction: 'notify', notifyOnEnforce: false, enforceOnStartup: true },
+         rules: [{ id: 'x', pattern: PADRAO_MFA, label: 'Portal MFA', limit: 3, action: 'close', enabled: true, createdAt: 123 }]
+       }),
+       {
+         version: 1,
+         settings: { defaultAction: 'notify', notifyOnEnforce: false, enforceOnStartup: true },
+         rules: [{ id: 'x', pattern: PADRAO_MFA, label: 'Portal MFA', limit: 3, action: 'close', enabled: true, createdAt: 123 }]
+       });
+    eq('migração preserva a ordem das regras',
+       migrateConfig({ rules: [
+         { id: 'a', pattern: 'https://a.com/*', limit: 1 },
+         { id: 'b', pattern: 'https://b.com/*', limit: 2 },
+         { id: 'c', pattern: 'https://c.com/*', limit: 3 }
+       ] }).rules.map((r) => r.id), ['a', 'b', 'c']);
+
+    // =====================================================================
+    // storage.js — ida e volta no chrome.storage.local
+    // =====================================================================
+
+    const MARKER_PATTERN = 'https://marcador-de-persistencia.invalid/etapa2/*';
+    const hasStorage = typeof chrome !== 'undefined' && !!chrome.storage?.local;
+
+    async function runStorageTests() {
+      section('storage — ida e volta no chrome.storage.local');
+
+      if (!hasStorage) {
+        skip('todos os testes de storage',
+             'chrome.storage.local indisponível: abra a página como chrome-extension://<ID>/tests/matcher.test.html');
+        return;
+      }
+
+      // Preserva a configuração real do usuário e devolve tudo no fim.
+      const snapshot = await getConfig();
+
+      try {
+        await saveConfig(defaultConfig());
+        eq('começa sem regras', (await getConfig()).rules.length, 0);
+
+        const added = await addRule({ pattern: 'HTTPS://Portal.Exemplo.com/mfa/*', label: 'Portal MFA', limit: 3 });
+        ok('addRule aceita a regra', added.ok === true);
+        eq('padrão foi gravado normalizado', added.rule.pattern, PADRAO_MFA);
+        eq('limite foi gravado', added.rule.limit, 3);
+        eq('ação gravada é "default"', added.rule.action, 'default');
+        ok('id é um uuid', /^[0-9a-f-]{36}$/i.test(added.rule.id));
+        ok('createdAt foi preenchido', added.rule.createdAt > 0);
+
+        let config = await getConfig();
+        eq('a regra foi persistida', config.rules.length, 1);
+        eq('leitura devolve o mesmo padrão', config.rules[0].pattern, PADRAO_MFA);
+
+        const dup = await addRule({ pattern: 'https://portal.exemplo.com/mfa/*', limit: 5 });
+        ok('padrão duplicado é recusado', dup.ok === false);
+        ok('recusa explica o motivo', dup.error.includes('Já existe'));
+        eq('nada foi gravado na recusa', (await getConfig()).rules.length, 1);
+
+        const badLimit = await addRule({ pattern: 'https://outro.com/*', limit: 0 });
+        ok('limite fora da faixa é recusado', badLimit.ok === false);
+        eq('nada foi gravado com limite inválido', (await getConfig()).rules.length, 1);
+
+        // Critério 3: padrões diferentes com limites independentes.
+        const second = await addRule({ pattern: 'https://intranet.exemplo.com/*', label: 'Intranet', limit: 1 });
+        ok('segunda regra é aceita', second.ok === true);
+        config = await getConfig();
+        eq('duas regras convivem', config.rules.length, 2);
+        eq('limites são independentes', config.rules.map((r) => r.limit), [3, 1]);
+        eq('a nova regra entra no fim da lista', config.rules[1].pattern, 'https://intranet.exemplo.com/*');
+
+        const updated = await updateRule(added.rule.id, { limit: 5, action: 'block' });
+        ok('updateRule aceita a alteração', updated.ok === true);
+        config = await getConfig();
+        eq('novo limite foi persistido', config.rules[0].limit, 5);
+        eq('nova ação foi persistida', config.rules[0].action, 'block');
+        eq('id foi preservado na edição', config.rules[0].id, added.rule.id);
+        eq('createdAt foi preservado na edição', config.rules[0].createdAt, added.rule.createdAt);
+
+        const collide = await updateRule(added.rule.id, { pattern: 'https://intranet.exemplo.com/*' });
+        ok('editar para um padrão já existente é recusado', collide.ok === false);
+        eq('padrão original permanece', (await getConfig()).rules[0].pattern, PADRAO_MFA);
+
+        const selfEdit = await updateRule(added.rule.id, { pattern: PADRAO_MFA, label: 'Novo rótulo' });
+        ok('reeditar a própria regra com o mesmo padrão é permitido', selfEdit.ok === true);
+        eq('rótulo foi atualizado', (await getConfig()).rules[0].label, 'Novo rótulo');
+
+        ok('updateRule com id inexistente falha', (await updateRule('nao-existe', { limit: 2 })).ok === false);
+
+        const moved = await moveRule(second.rule.id, -1);
+        ok('moveRule sobe a regra', moved.ok === true && moved.moved === true);
+        eq('a ordem mudou', (await getConfig()).rules.map((r) => r.id), [second.rule.id, added.rule.id]);
+        eq('subir a primeira não faz nada', (await moveRule(second.rule.id, -1)).moved, false);
+        ok('moveRule com id inexistente falha', (await moveRule('nao-existe', 1)).ok === false);
+
+        const settings = await updateSettings({ defaultAction: 'notify', enforceOnStartup: true });
+        ok('updateSettings aceita valores válidos', settings.ok === true);
+        config = await getConfig();
+        eq('ação padrão foi persistida', config.settings.defaultAction, 'notify');
+        eq('enforceOnStartup foi persistido', config.settings.enforceOnStartup, true);
+        eq('as demais configurações não mudaram', config.settings.notifyOnEnforce, true);
+        ok('ação padrão inválida é recusada', (await updateSettings({ defaultAction: 'lixo' })).ok === false);
+        eq('nada mudou após a recusa', (await getConfig()).settings.defaultAction, 'notify');
+
+        const removed = await removeRule(added.rule.id);
+        ok('removeRule remove', removed.ok === true);
+        config = await getConfig();
+        eq('sobrou uma regra', config.rules.length, 1);
+        eq('sobrou a regra certa', config.rules[0].id, second.rule.id);
+        ok('remover id inexistente falha', (await removeRule('nao-existe')).ok === false);
+
+        // Escritas concorrentes: sem a fila serializada, uma sobrescreveria a outra.
+        await saveConfig(defaultConfig());
+        const concurrent = await Promise.all([
+          addRule({ pattern: 'https://c1.exemplo.com/*', limit: 1 }),
+          addRule({ pattern: 'https://c2.exemplo.com/*', limit: 2 }),
+          addRule({ pattern: 'https://c3.exemplo.com/*', limit: 3 }),
+          addRule({ pattern: 'https://c4.exemplo.com/*', limit: 4 }),
+          addRule({ pattern: 'https://c5.exemplo.com/*', limit: 5 })
+        ]);
+        ok('as 5 escritas concorrentes foram aceitas', concurrent.every((r) => r.ok));
+        eq('nenhuma escrita concorrente foi perdida', (await getConfig()).rules.length, 5);
+
+        // Concorrência com duplicidade: só a primeira pode entrar.
+        await saveConfig(defaultConfig());
+        const race = await Promise.all([
+          addRule({ pattern: 'https://corrida.exemplo.com/*', limit: 1 }),
+          addRule({ pattern: 'https://corrida.exemplo.com/*', limit: 2 })
+        ]);
+        eq('duplicado concorrente entra só uma vez', race.filter((r) => r.ok).length, 1);
+        eq('storage tem apenas uma regra', (await getConfig()).rules.length, 1);
+
+        // ensureConfig
+        await chrome.storage.local.remove('config');
+        const ensured = await ensureConfig();
+        eq('ensureConfig grava os defaults', ensured, defaultConfig());
+        eq('os defaults ficaram no storage', await getConfig(), defaultConfig());
+      } finally {
+        // Devolve a configuração do usuário exatamente como estava.
+        await saveConfig(snapshot);
+      }
+
+      eq('configuração do usuário foi restaurada', (await getConfig()), snapshot);
+    }
+
+    // ------------------------------------------------- painel de persistência
+    async function refreshMarker() {
+      const statusEl = document.getElementById('markerStatus');
+      const config = await getConfig();
+      const marker = config.rules.find((rule) => rule.pattern === MARKER_PATTERN);
+      if (marker) {
+        const when = marker.createdAt ? new Date(marker.createdAt).toLocaleString('pt-BR') : 'data desconhecida';
+        statusEl.textContent = `✓ Marcador presente — criado em ${when}. Total de regras: ${config.rules.length}.`;
+        statusEl.style.color = '#6a9955';
+      } else {
+        statusEl.textContent = `— Marcador ausente. Total de regras: ${config.rules.length}.`;
+        statusEl.style.color = '#c0a24a';
+      }
+    }
+
+    function setUpMarkerPanel() {
+      const panel = document.getElementById('markerPanel');
+      if (!hasStorage) return;
+      panel.hidden = false;
+
+      document.getElementById('createMarker').addEventListener('click', async () => {
+        await addRule({ pattern: MARKER_PATTERN, label: 'Marcador de persistência', limit: 3 });
+        await refreshMarker();
+      });
+
+      document.getElementById('removeMarker').addEventListener('click', async () => {
+        const config = await getConfig();
+        const marker = config.rules.find((rule) => rule.pattern === MARKER_PATTERN);
+        if (marker) await removeRule(marker.id);
+        await refreshMarker();
+      });
+
+      return refreshMarker();
+    }
+
+    // ---------------------------------------------------------------- render
+    function render() {
+      const resultsEl = document.getElementById('results');
+      const fragment = document.createDocumentFragment();
+
+      for (const entry of cases) {
+        if (entry.kind === 'section') {
+          const heading = document.createElement('h2');
+          heading.textContent = entry.name;
+          fragment.appendChild(heading);
+          continue;
+        }
+        const line = document.createElement('div');
+        if (entry.kind === 'skip') {
+          line.className = 'case skip';
+          line.textContent = `● PULADO — ${entry.name}`;
+          const detail = document.createElement('span');
+          detail.className = 'detail';
+          detail.textContent = entry.detail;
+          line.appendChild(detail);
+        } else {
+          line.className = `case ${entry.ok ? 'pass' : 'fail'}`;
+          line.textContent = `${entry.ok ? '✓' : '✗'} ${entry.name}`;
+          if (!entry.ok) {
+            const detail = document.createElement('span');
+            detail.className = 'detail';
+            detail.textContent = entry.detail;
+            line.appendChild(detail);
+          }
+        }
+        fragment.appendChild(line);
+      }
+      resultsEl.appendChild(fragment);
+
+      const total = passed + failed;
+      const summaryEl = document.getElementById('summary');
+      summaryEl.className = `summary ${failed === 0 ? 'ok' : 'bad'}`;
+      summaryEl.innerHTML =
+        `<b>${failed === 0 ? '✓ TODAS AS ASSERÇÕES VERDES' : `✗ ${failed} ASSERÇÃO(ÕES) FALHARAM`}</b><br>` +
+        `${passed} de ${total} passaram` +
+        (skipped > 0 ? ` · <span style="color:#c0a24a">${skipped} grupo(s) pulado(s)</span>` : '');
+    }
+
+    try {
+      await runStorageTests();
+    } catch (error) {
+      record('testes de storage concluíram sem exceção', false, String(error));
+    }
+
+    render();
+
+    try {
+      await setUpMarkerPanel();
+    } catch (error) {
+      document.getElementById('markerStatus').textContent = `Erro: ${error}`;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+node_modules/
+target/
+dist/
+build/
+.next/
+.venv/
+venv/
+__pycache__/
+.alethe/
+.env
+.env.local
+
+# Configuração local de ferramentas (específica desta máquina)
+.claude/
+
+# Pacote de distribuição: é artefato gerado, não fonte
+*.zip

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Limitador de Abas</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>Limitador de Abas</h1>
+    <p class="sub">Quantas abas cada endereço pode ter abertas ao mesmo tempo.</p>
+  </header>
+
+  <section>
+    <h2>Ação quando o limite é atingido</h2>
+    <div class="radios" id="defaultAction">
+      <label>
+        <input type="radio" name="defaultAction" value="close">
+        <span><b>Fechar</b> a aba nova e ir para uma já aberta</span>
+      </label>
+      <label>
+        <input type="radio" name="defaultAction" value="closeQuiet">
+        <span><b>Fechar sozinho</b> — fecha a aba nova sem trocar de aba nem de janela</span>
+      </label>
+      <label>
+        <input type="radio" name="defaultAction" value="block">
+        <span><b>Bloquear</b> — a aba fica aberta com uma página de aviso</span>
+      </label>
+      <label>
+        <input type="radio" name="defaultAction" value="notify">
+        <span><b>Só avisar</b> — nenhuma aba é fechada</span>
+      </label>
+    </div>
+
+    <label class="check">
+      <input type="checkbox" id="notifyOnEnforce">
+      <span>Mostrar aviso quando uma aba for fechada ou bloqueada</span>
+    </label>
+    <label class="check">
+      <input type="checkbox" id="enforceOnStartup">
+      <span>Aplicar os limites às abas restauradas ao abrir o Chrome</span>
+    </label>
+  </section>
+
+  <section>
+    <div class="head">
+      <h2>Regras</h2>
+      <span class="tag" id="ruleCount"></span>
+    </div>
+    <p class="hint">
+      Avaliadas de cima para baixo: <b>a primeira que casar vence</b>.
+      Use ↑ ↓ para mudar a prioridade.
+    </p>
+    <div id="rules"></div>
+    <p class="empty" id="emptyRules" hidden>
+      Nenhuma regra cadastrada. Adicione a primeira abaixo.
+    </p>
+  </section>
+
+  <section>
+    <h2>Nova regra</h2>
+    <form id="addForm" autocomplete="off">
+      <label class="field">
+        <span>Padrão de URL</span>
+        <input type="text" id="pattern" placeholder="https://exemplo.com/pasta/*" required>
+      </label>
+      <p class="suggest" id="suggestions" hidden></p>
+
+      <label class="field">
+        <span>Nome <i>(opcional)</i></span>
+        <input type="text" id="label" placeholder="Portal MFA" maxlength="60">
+      </label>
+
+      <div class="row">
+        <label class="field small">
+          <span>Limite</span>
+          <input type="number" id="limit" value="3" min="1" max="99" step="1" required>
+        </label>
+        <label class="field grow">
+          <span>Ação</span>
+          <select id="action">
+            <option value="default">Padrão global</option>
+            <option value="close">Fechar a aba nova</option>
+            <option value="closeQuiet">Fechar sozinho</option>
+            <option value="block">Bloquear com aviso</option>
+            <option value="notify">Só avisar</option>
+          </select>
+        </label>
+      </div>
+
+      <p class="msg error" id="addError" hidden></p>
+      <p class="msg warn" id="addWarning" hidden></p>
+      <button type="submit" class="primary">Adicionar regra</button>
+    </form>
+    <p class="hint">
+      O <code>*</code> substitui qualquer sequência de caracteres.
+      Ex.: <code>https://portal.exemplo.com/mfa/*</code>
+    </p>
+  </section>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

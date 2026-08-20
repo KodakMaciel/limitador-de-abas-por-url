@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Testes — contagem e casos-limite</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: Consolas, 'Courier New', monospace;
+      background-color: #1e1e1e;
+      color: #d4d4d4;
+      padding: 24px;
+      line-height: 1.5;
+    }
+    h1 { font-size: 20px; margin-bottom: 4px; color: #4ec9b0; }
+    .hint { font-size: 12px; color: #858585; margin-bottom: 20px; }
+    h2 {
+      font-size: 14px;
+      color: #569cd6;
+      margin: 22px 0 8px;
+      border-bottom: 1px solid #333;
+      padding-bottom: 4px;
+    }
+    .summary {
+      padding: 14px 16px;
+      border-radius: 4px;
+      border: 1px solid #3e3e42;
+      background-color: #252526;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+    .summary.ok { border-color: #4ec9b0; }
+    .summary.bad { border-color: #f48771; }
+    .summary b { font-size: 16px; }
+    .case { font-size: 12.5px; padding: 3px 8px; border-radius: 3px; }
+    .case.pass { color: #6a9955; }
+    .case.fail { background-color: #3a1e1e; color: #f48771; margin: 3px 0; }
+    .detail { display: block; padding-left: 18px; color: #ce9178; }
+    .banner {
+      padding: 14px 16px;
+      border: 1px solid #c0a24a;
+      background-color: #33301e;
+      border-radius: 4px;
+      color: #e0c880;
+      font-size: 13px;
+      margin-bottom: 20px;
+    }
+    .note {
+      padding: 12px 16px;
+      border-left: 3px solid #4ec9b0;
+      background-color: #252526;
+      font-size: 12.5px;
+      color: #9e9e9e;
+      margin-bottom: 20px;
+    }
+    code { color: #ce9178; }
+  </style>
+</head>
+<body>
+  <h1>Testes — contagem e casos-limite (Etapa 6)</h1>
+  <p class="hint">
+    Abra por <code>chrome-extension://&lt;ID&gt;/tests/counter.test.html</code>.
+    Em <code>file://</code> o navegador bloqueia módulos ES.
+  </p>
+
+  <div class="banner" id="loadBanner">
+    Os módulos não carregaram. Copie o ID em <code>chrome://extensions</code> e abra
+    <code>chrome-extension://&lt;ID&gt;/tests/counter.test.html</code>.
+  </div>
+
+  <p class="note">
+    Esta página usa <b>somente funções puras</b> de <code>counter.js</code>, com abas de
+    mentira. Ela não chama nenhuma API do Chrome e por isso <b>não pode</b> fechar,
+    abrir ou navegar aba nenhuma. O motor completo (<code>background.js</code>) é
+    verificado fora do navegador, com o <code>chrome</code> simulado.
+  </p>
+
+  <div id="summary"></div>
+  <div id="results"></div>
+
+  <script type="module">
+    import {
+      competingTabsFor, compileRules, countByRule, effectiveTabUrl,
+      isCountableTab, matchRuleFor
+    } from '../src/lib/counter.js';
+
+    document.getElementById('loadBanner').remove();
+
+    // ---------------------------------------------------------------- runner
+    const cases = [];
+    let passed = 0;
+    let failed = 0;
+
+    function section(name) {
+      cases.push({ kind: 'section', name });
+    }
+    function record(name, isOk, detail) {
+      if (isOk) passed++;
+      else failed++;
+      cases.push({ kind: 'case', name, ok: isOk, detail: isOk ? null : detail });
+    }
+    function ok(name, value) {
+      record(name, value === true, `esperado true, obtido ${show(value)}`);
+    }
+    function eq(name, actual, expected) {
+      record(name, show(actual) === show(expected),
+             `esperado ${show(expected)}, obtido ${show(actual)}`);
+    }
+    function show(value) {
+      if (typeof value === 'string') return JSON.stringify(value);
+      try { return JSON.stringify(value); } catch { return String(value); }
+    }
+
+    // ------------------------------------------------------------- cenário
+    const MFA = 'https://portal.exemplo.com/mfa/';
+    const RULE = { id: 'r1', pattern: `${MFA}*`, limit: 3, action: 'default', enabled: true };
+    const compiled = compileRules([RULE]);
+
+    /** Aba recém-criada: `url` vazia e destino em `pendingUrl` (armadilha 1). */
+    const novaAba = (id, url, windowId = 1) =>
+      ({ id, windowId, url: '', pendingUrl: url, incognito: false });
+
+    /** Aba que já carregou uma página. */
+    const abaCarregada = (id, url, windowId = 1) =>
+      ({ id, windowId, url, pendingUrl: '', incognito: false });
+
+    /**
+     * Roda a fila serializada com a mesma decisão do motor: para cada evento,
+     * se as abas que já disputam a vaga alcançam o limite, a aba do evento é
+     * impedida. Devolve quem sobrou e quem foi impedida, na ordem.
+     */
+    function rodarFila(tabsIniciais, eventos, { action = 'close' } = {}) {
+      let tabs = [...tabsIniciais];
+      const impedidas = [];
+
+      for (const [tipo, tabId] of eventos) {
+        const trigger = tabs.find((tab) => tab.id === tabId);
+        if (!trigger || !isCountableTab(trigger)) continue;
+
+        // Confirmação em onUpdated: a aba passa a ter url de verdade.
+        if (tipo === 'updated' && trigger.pendingUrl) {
+          trigger.url = trigger.pendingUrl;
+          trigger.pendingUrl = '';
+        }
+
+        const match = matchRuleFor(effectiveTabUrl(trigger), compiled);
+        if (!match) continue;
+
+        const competing = competingTabsFor(tabs, compiled, match.rule, trigger, {
+          fromCreation: tipo === 'created'
+        });
+        if (competing.length < match.rule.limit) continue;
+
+        impedidas.push(trigger.id);
+        // Espelha actionClosesTab() de storage.js: close e closeQuiet fecham; o
+        // resto fica com a página de aviso. A diferença entre as duas (focar ou
+        // não uma aba já aberta) não muda quem sobrevive, então não aparece aqui.
+        if (action === 'close' || action === 'closeQuiet') {
+          tabs = tabs.filter((tab) => tab.id !== trigger.id);
+        } else {
+          trigger.url = 'chrome-extension://abc/src/blocked/blocked.html?x=1';
+          trigger.pendingUrl = '';
+        }
+      }
+
+      const sobreviventes = tabs
+        .filter((tab) => isCountableTab(tab) && matchRuleFor(effectiveTabUrl(tab), compiled))
+        .map((tab) => tab.id);
+      return { sobreviventes, impedidas };
+    }
+
+    // =====================================================================
+    section('URL efetiva da aba (armadilha 1)');
+    eq('aba nova usa pendingUrl',
+       effectiveTabUrl({ url: '', pendingUrl: `${MFA}x` }), `${MFA}x`);
+    eq('aba navegando prefere o destino',
+       effectiveTabUrl({ url: 'https://google.com/', pendingUrl: `${MFA}x` }), `${MFA}x`);
+    eq('aba parada usa a url atual',
+       effectiveTabUrl({ url: `${MFA}x`, pendingUrl: '' }), `${MFA}x`);
+    eq('aba sem nada devolve vazio', effectiveTabUrl({ url: '', pendingUrl: '' }), '');
+    eq('undefined devolve vazio', effectiveTabUrl(undefined), '');
+
+    section('Quais abas entram na conta (regras 9 e 10)');
+    ok('aba http conta', isCountableTab(abaCarregada(1, `${MFA}x`)));
+    ok('aba anônima não conta',
+       isCountableTab({ ...abaCarregada(2, `${MFA}x`), incognito: true }) === false);
+    ok('aba chrome:// não conta', isCountableTab(abaCarregada(3, 'chrome://extensions')) === false);
+    ok('página de aviso não conta (armadilha 4)',
+       isCountableTab(abaCarregada(4, 'chrome-extension://abc/src/blocked/blocked.html')) === false);
+    ok('aba file:// não conta', isCountableTab(abaCarregada(5, 'file:///C:/x.html')) === false);
+    ok('aba sem URL não conta', isCountableTab({ id: 6, url: '', pendingUrl: '' }) === false);
+    ok('aba sem id não conta', isCountableTab({ url: `${MFA}x` }) === false);
+    ok('aba com id negativo não conta', isCountableTab(abaCarregada(-1, `${MFA}x`)) === false);
+
+    section('Rajada de 10 Ctrl+clique, limite 3 (critério 11)');
+    {
+      const tabs = [];
+      for (let i = 0; i < 10; i++) tabs.push(novaAba(101 + i, `${MFA}p${i}`));
+      const { sobreviventes, impedidas } = rodarFila(tabs, tabs.map((t) => ['created', t.id]));
+      eq('sobram exatamente 3', sobreviventes.length, 3);
+      eq('sobram as 3 primeiras', sobreviventes, [101, 102, 103]);
+      eq('as 7 impedidas são as mais novas', impedidas, [104, 105, 106, 107, 108, 109, 110]);
+    }
+    {
+      const tabs = [];
+      for (let i = 0; i < 10; i++) tabs.push(novaAba(201 + i, `${MFA}p${i}`));
+      const { sobreviventes, impedidas } =
+        rodarFila(tabs, tabs.map((t) => ['created', t.id]), { action: 'block' });
+      eq('com a ação block também sobram 3', sobreviventes, [201, 202, 203]);
+      eq('e 7 são impedidas', impedidas.length, 7);
+    }
+    {
+      const tabs = [];
+      for (let i = 0; i < 10; i++) tabs.push(novaAba(251 + i, `${MFA}p${i}`));
+      const { sobreviventes, impedidas } =
+        rodarFila(tabs, tabs.map((t) => ['created', t.id]), { action: 'closeQuiet' });
+      eq('com a ação closeQuiet também sobram as 3 primeiras', sobreviventes, [251, 252, 253]);
+      eq('e as 7 mais novas são fechadas', impedidas.length, 7);
+    }
+
+    section('Ordem patológica de eventos');
+    {
+      const tabs = [];
+      for (let i = 0; i < 10; i++) tabs.push(novaAba(301 + i, `${MFA}p${i}`));
+      const eventos = [
+        ['created', 301], ['created', 302], ['created', 303],
+        ['updated', 301],
+        ...Array.from({ length: 7 }, (_, i) => ['created', 304 + i])
+      ];
+      eq('onUpdated antecipado não derruba a 1ª aba',
+         rodarFila(tabs, eventos).sobreviventes, [301, 302, 303]);
+    }
+    {
+      const tabs = [];
+      for (let i = 0; i < 6; i++) tabs.push(novaAba(401 + i, `${MFA}p${i}`));
+      const eventos = [];
+      for (const tab of tabs) {
+        eventos.push(['created', tab.id]);
+        eventos.push(['updated', tab.id]);
+      }
+      eq('created e updated intercalados mantêm 3',
+         rodarFila(tabs, eventos).sobreviventes, [401, 402, 403]);
+    }
+
+    section('Rajada em que uma irmã mais nova carrega primeiro');
+    {
+      // Cenário que o critério antigo (só "ainda não carregou") errava: as abas
+      // 102-104 são MAIS NOVAS que a 101, mas já carregaram. Contá-las faria a
+      // PRIMEIRA aba da rajada ser bloqueada, e não a quarta.
+      const tabs = [
+        novaAba(101, `${MFA}p1`),
+        abaCarregada(102, `${MFA}p2`),
+        abaCarregada(103, `${MFA}p3`),
+        abaCarregada(104, `${MFA}p4`)
+      ];
+      eq('aba recém-criada não disputa com nenhuma aba mais nova',
+         competingTabsFor(tabs, compiled, RULE, tabs[0], { fromCreation: true }).length, 0);
+      eq('sem fromCreation, as mais novas já carregadas contariam',
+         competingTabsFor(tabs, compiled, RULE, tabs[0]).length, 3);
+      eq('a 101 é liberada, não bloqueada',
+         rodarFila(tabs, [['created', 101]]).impedidas, []);
+      ok('e a ordem por id é exata: não depende de quem carregou primeiro',
+         competingTabsFor(tabs, compiled, RULE, tabs[0], { fromCreation: true }).length ===
+         competingTabsFor(
+           [novaAba(101, `${MFA}p1`), novaAba(102, `${MFA}p2`), novaAba(103, `${MFA}p3`)],
+           compiled, RULE, { id: 101, windowId: 1, url: '', pendingUrl: `${MFA}p1`, incognito: false },
+           { fromCreation: true }
+         ).length);
+    }
+    {
+      // Uma aba mais ANTIGA que já ocupa vaga continua contando normalmente.
+      const tabs = [
+        abaCarregada(50, `${MFA}antiga1`),
+        abaCarregada(51, `${MFA}antiga2`),
+        abaCarregada(52, `${MFA}antiga3`),
+        novaAba(90, `${MFA}nova`)
+      ];
+      eq('aba nova disputa com as 3 antigas',
+         competingTabsFor(tabs, compiled, RULE, tabs[3], { fromCreation: true }).length, 3);
+      eq('e por isso é impedida', rodarFila(tabs, [['created', 90]]).impedidas, [90]);
+    }
+
+    section('Quem causou o excesso (regra 8)');
+    {
+      const tabs = [
+        abaCarregada(2, 'https://google.com/'),
+        abaCarregada(5, `${MFA}a`),
+        abaCarregada(6, `${MFA}b`),
+        abaCarregada(7, `${MFA}c`)
+      ];
+      tabs[0].pendingUrl = `${MFA}d`; // a aba 2 está navegando para a regra
+      const { sobreviventes, impedidas } = rodarFila(tabs, [['updated', 2]]);
+      eq('a aba antiga que navegou é a impedida', impedidas, [2]);
+      eq('as 3 abas em uso continuam', sobreviventes, [5, 6, 7]);
+    }
+    {
+      const tabs = [abaCarregada(5, `${MFA}a`), abaCarregada(6, `${MFA}b`), novaAba(9, `${MFA}c`)];
+      const { sobreviventes, impedidas } = rodarFila(tabs, [['created', 9]]);
+      eq('com folga nada é impedido', impedidas, []);
+      eq('as 3 convivem', sobreviventes, [5, 6, 9]);
+    }
+
+    section('Vagas liberadas');
+    {
+      const saindo = abaCarregada(5, `${MFA}a`);
+      saindo.pendingUrl = 'https://google.com/'; // está saindo da regra
+      const tabs = [saindo, abaCarregada(6, `${MFA}b`), abaCarregada(7, `${MFA}c`),
+                    novaAba(20, `${MFA}d`)];
+      eq('aba navegando para fora deixa de contar',
+         competingTabsFor(tabs, compiled, RULE, tabs[3]).map((t) => t.id), [6, 7]);
+      eq('e a vaga liberada é aproveitada', rodarFila(tabs, [['created', 20]]).impedidas, []);
+    }
+
+    section('Abas fora do escopo não empurram o limite');
+    {
+      const tabs = [
+        { ...abaCarregada(50, `${MFA}x`), incognito: true },
+        abaCarregada(51, 'chrome://extensions'),
+        abaCarregada(52, 'chrome-extension://abc/src/blocked/blocked.html'),
+        abaCarregada(55, `${MFA}a`),
+        novaAba(56, `${MFA}b`)
+      ];
+      eq('anônima e internas ficam de fora', rodarFila(tabs, [['created', 56]]).impedidas, []);
+      eq('e não entram na contagem', countByRule(tabs, compiled).get('r1'), 2);
+    }
+
+    section('Limites independentes por regra (critério 3)');
+    {
+      const regras = [
+        { id: 'a', pattern: `${MFA}*`, limit: 3, enabled: true },
+        { id: 'b', pattern: 'https://intranet.exemplo.com/*', limit: 1, enabled: true }
+      ];
+      const dois = compileRules(regras);
+      const tabs = [
+        abaCarregada(1, `${MFA}a`), abaCarregada(2, `${MFA}b`), abaCarregada(3, `${MFA}c`),
+        abaCarregada(4, 'https://intranet.exemplo.com/home')
+      ];
+      const counts = countByRule(tabs, dois);
+      eq('regra A com 3 abas', counts.get('a'), 3);
+      eq('regra B com 1 aba', counts.get('b'), 1);
+
+      const novaMfa = novaAba(10, `${MFA}d`);
+      const novaIntra = novaAba(11, 'https://intranet.exemplo.com/x');
+      const todas = [...tabs, novaMfa, novaIntra];
+      ok('a 4ª aba do MFA estoura o limite 3',
+         competingTabsFor(todas, dois, regras[0], novaMfa).length >= 3);
+      ok('a 2ª aba da intranet estoura o limite 1',
+         competingTabsFor(todas, dois, regras[1], novaIntra).length >= 1);
+      ok('e uma não interfere na outra',
+         competingTabsFor(todas, dois, regras[1], novaIntra).length === 1);
+    }
+
+    section('A primeira regra que casar vence');
+    {
+      const regras = [
+        { id: 'especifica', pattern: `${MFA}*`, limit: 2, enabled: true },
+        { id: 'ampla', pattern: 'https://portal.exemplo.com/*', limit: 10, enabled: true }
+      ];
+      const dois = compileRules(regras);
+      const tabs = [
+        abaCarregada(1, `${MFA}a`),
+        abaCarregada(2, `${MFA}b`),
+        abaCarregada(3, 'https://portal.exemplo.com/portal')
+      ];
+      const counts = countByRule(tabs, dois);
+      eq('aba do MFA conta só para a regra específica', counts.get('especifica'), 2);
+      eq('a regra ampla conta só o que sobrou', counts.get('ampla'), 1);
+      eq('a soma das contagens é o total de abas que casam',
+         counts.get('especifica') + counts.get('ampla'), 3);
+      eq('inverter a ordem muda a atribuição',
+         countByRule(tabs, compileRules([...regras].reverse())).get('ampla'), 3);
+    }
+
+    section('Regra desativada ou inválida');
+    {
+      eq('regra desativada não compila', compileRules([{ ...RULE, enabled: false }]).length, 0);
+      eq('sem regra compilada nada casa',
+         matchRuleFor(`${MFA}a`, compileRules([{ ...RULE, enabled: false }])), null);
+      eq('padrão inválido é ignorado na compilação',
+         compileRules([{ id: 'x', pattern: 'lixo', limit: 3, enabled: true }]).length, 0);
+      eq('lista vazia compila vazio', compileRules([]).length, 0);
+      eq('lista inválida compila vazio', compileRules(null).length, 0);
+      eq('URL interna não casa com nada', matchRuleFor('chrome://extensions', compiled), null);
+    }
+
+    section('Restauração de sessão acima do limite (critério 12)');
+    {
+      const tabs = [1, 2, 3, 4, 5].map((i) => abaCarregada(i, `${MFA}p${i}`));
+      const ordenadas = [...tabs].sort((a, b) => a.id - b.id);
+      eq('a contagem vê as 5 abas restauradas', countByRule(tabs, compiled).get('r1'), 5);
+      eq('as 3 mais antigas seriam mantidas',
+         ordenadas.slice(0, RULE.limit).map((t) => t.id), [1, 2, 3]);
+      eq('só o excedente seria tratado',
+         ordenadas.slice(RULE.limit).map((t) => t.id), [4, 5]);
+    }
+
+    section('Várias janelas somam na mesma conta (critério 6)');
+    {
+      const tabs = [
+        abaCarregada(1, `${MFA}a`, 1),
+        abaCarregada(2, `${MFA}b`, 2),
+        abaCarregada(3, `${MFA}c`, 3)
+      ];
+      eq('3 janelas, 1 aba cada, contam 3', countByRule(tabs, compiled).get('r1'), 3);
+      const nova = novaAba(9, `${MFA}d`, 4);
+      eq('a 4ª aba estoura mesmo estando em outra janela',
+         competingTabsFor([...tabs, nova], compiled, RULE, nova).length, 3);
+    }
+
+    // ---------------------------------------------------------------- render
+    const resultsEl = document.getElementById('results');
+    const fragment = document.createDocumentFragment();
+    for (const entry of cases) {
+      if (entry.kind === 'section') {
+        const heading = document.createElement('h2');
+        heading.textContent = entry.name;
+        fragment.appendChild(heading);
+        continue;
+      }
+      const line = document.createElement('div');
+      line.className = `case ${entry.ok ? 'pass' : 'fail'}`;
+      line.textContent = `${entry.ok ? '✓' : '✗'} ${entry.name}`;
+      if (!entry.ok) {
+        const detail = document.createElement('span');
+        detail.className = 'detail';
+        detail.textContent = entry.detail;
+        line.appendChild(detail);
+      }
+      fragment.appendChild(line);
+    }
+    resultsEl.appendChild(fragment);
+
+    const summaryEl = document.getElementById('summary');
+    summaryEl.className = `summary ${failed === 0 ? 'ok' : 'bad'}`;
+    summaryEl.innerHTML =
+      `<b>${failed === 0 ? '✓ TODAS AS ASSERÇÕES VERDES' : `✗ ${failed} ASSERÇÃO(ÕES) FALHARAM`}</b><br>` +
+      `${passed} de ${passed + failed} passaram`;
+  </script>
+</body>
+</html>

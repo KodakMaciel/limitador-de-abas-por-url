@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Limite de abas atingido</title>
+  <link rel="stylesheet" href="blocked.css">
+</head>
+<body>
+  <main class="card">
+    <p class="eyebrow">Limitador de Abas</p>
+    <h1>Limite de abas atingido</h1>
+    <p class="lead" id="lead">
+      Esta aba foi impedida porque o limite deste endereço já estava completo.
+    </p>
+
+    <dl class="detail" id="detail" hidden>
+      <div>
+        <dt>Regra</dt>
+        <dd id="ruleName"></dd>
+      </div>
+      <div>
+        <dt>Limite</dt>
+        <dd id="ruleLimit"></dd>
+      </div>
+      <div class="wide">
+        <dt>Padrão</dt>
+        <dd><code id="rulePattern"></code></dd>
+      </div>
+      <div class="wide" id="urlRow" hidden>
+        <dt>Endereço impedido</dt>
+        <dd><code id="blockedUrl"></code></dd>
+      </div>
+    </dl>
+
+    <div class="actions">
+      <button type="button" id="goToTab" class="primary" hidden>Ir para uma aba já aberta</button>
+      <button type="button" id="goBack" hidden>Voltar</button>
+      <button type="button" id="closeTab">Fechar esta aba</button>
+    </div>
+
+    <p class="foot">Feche uma das abas já abertas para liberar uma vaga.</p>
+  </main>
+
+  <script src="blocked.js" type="module"></script>
+</body>
+</html>

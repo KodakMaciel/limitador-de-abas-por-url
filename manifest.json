@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Limitador de Abas por URL",
+  "version": "1.1.1",
+  "description": "Limite o número máximo de abas abertas por site com padrões de URL customizáveis.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "tabs",
+    "storage",
+    "notifications"
+  ],
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Limitador de Abas por URL"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  }
+}
